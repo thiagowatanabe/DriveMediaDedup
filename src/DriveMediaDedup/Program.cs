@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Configuration;
 using DriveMediaDedup.Services;
+using DriveMediaDedup.Models;  
 
 // Carrega as configurações
 var config = new ConfigurationBuilder()
@@ -12,14 +13,14 @@ var foldersConfig = config.GetSection("Folders");
 var gitHubConfig = config.GetSection("GitHub");
 var s3Config = config.GetSection("S3");
 
-// Lê as configurações de pastas
-var tempFolder = foldersConfig["Temp"]!;
-var organizedFolder = foldersConfig["Organized"]!;
-var repeatedFolder = foldersConfig["Repeated"]!;
-var videosFolder = foldersConfig["Videos"]!;
+// Caminho base dos downloads — SEMPRE na pasta de output (bin/Debug/net10.0/)
+var downloadsPath = Path.Combine(AppContext.BaseDirectory, "downloads");
 
-// Caminho base dos downloads
-var downloadsPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "downloads"));
+// Lê as configurações de pastas — caminhos absolutos baseados no downloadsPath
+var tempFolder = Path.Combine(downloadsPath, "temp");
+var organizedFolder = Path.Combine(downloadsPath, "organizadas");
+var repeatedFolder = Path.Combine(downloadsPath, "repetidas");
+var videosFolder = Path.Combine(downloadsPath, "videos");
 
 Console.WriteLine("=== DriveMediaDedup ===");
 Console.WriteLine();
@@ -92,7 +93,6 @@ foreach (var file in mediaFiles)
     }
 }
 
-// === ETAPA 3: Zipar os arquivos ===
 // === ETAPA 3: Zipar os arquivos (apenas únicas e vídeos — sem repetidas) ===
 Console.WriteLine();
 Console.WriteLine("3. Compactando arquivos (organizadas + vídeos)...");
@@ -114,10 +114,13 @@ var s3Service = new S3Service(
     s3Config["BucketName"]!,
     s3Config["Region"]!);
 
+var s3UploadSuccess = false;
+
 try
 {
     var s3Url = await s3Service.UploadFileAsync(zipPath);
     Console.WriteLine($"   Upload concluído: {s3Url}");
+    s3UploadSuccess = true;
 }
 catch (Exception ex)
 {
@@ -128,6 +131,7 @@ Console.WriteLine();
 // === ETAPA 5: Deletar arquivos do Drive ===
 Console.WriteLine("5. Deletando arquivos do Google Drive...");
 var deletedCount = 0;
+var skippedCount = 0;
 
 foreach (var (file, success) in processedFiles)
 {
@@ -138,7 +142,12 @@ foreach (var (file, success) in processedFiles)
     {
         await driveService.DeleteFileAsync(file.Id);
         deletedCount++;
-        Console.Write($"\r   Deletados: {deletedCount}/{processedFiles.Count(f => f.Success)}");
+    }
+    catch (Google.GoogleApiException ex) when (ex.HttpStatusCode == System.Net.HttpStatusCode.Forbidden)
+    {
+        // Arquivo compartilhado — não temos permissão para deletar
+        skippedCount++;
+        Console.WriteLine($"   ⏭️  Pulado (sem permissão): {file.Name}");
     }
     catch (Exception ex)
     {
@@ -146,7 +155,67 @@ foreach (var (file, success) in processedFiles)
     }
 }
 
+Console.WriteLine($"   Deletados: {deletedCount}");
+Console.WriteLine($"   Pulados (sem permissão): {skippedCount}");
 Console.WriteLine();
+
+// === ETAPA 6: Limpeza dos arquivos locais ===
+Console.WriteLine("6. Limpando arquivos locais...");
+
+if (s3UploadSuccess)
+{
+    try
+    {
+        // Deleta todas as pastas de downloads
+        if (Directory.Exists(Path.Combine(downloadsPath, "temp")))
+        {
+            Directory.Delete(Path.Combine(downloadsPath, "temp"), recursive: true);
+            Console.WriteLine("   ✓ Pasta temp/ excluída");
+        }
+
+        if (Directory.Exists(Path.Combine(downloadsPath, "organizadas")))
+        {
+            Directory.Delete(Path.Combine(downloadsPath, "organizadas"), recursive: true);
+            Console.WriteLine("   ✓ Pasta organizadas/ excluída");
+        }
+
+        if (Directory.Exists(Path.Combine(downloadsPath, "repetidas")))
+        {
+            Directory.Delete(Path.Combine(downloadsPath, "repetidas"), recursive: true);
+            Console.WriteLine("   ✓ Pasta repetidas/ excluída");
+        }
+
+        if (Directory.Exists(Path.Combine(downloadsPath, "videos")))
+        {
+            Directory.Delete(Path.Combine(downloadsPath, "videos"), recursive: true);
+            Console.WriteLine("   ✓ Pasta videos/ excluída");
+        }
+
+        // Deleta o arquivo zip
+        if (File.Exists(zipPath))
+        {
+            File.Delete(zipPath);
+            Console.WriteLine("   ✓ Arquivo zip excluído");
+        }
+
+        // Deleta a pasta zips se estiver vazia
+        if (Directory.Exists(zipOutputFolder))
+        {
+            Directory.Delete(zipOutputFolder, recursive: true);
+        }
+
+        Console.WriteLine("   Limpeza concluída!");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"   Erro na limpeza: {ex.Message}");
+    }
+}
+else
+{
+    Console.WriteLine("   ⚠️ Upload S3 falhou — mantendo arquivos locais como backup");
+}
+
 Console.WriteLine();
 
 // === RELATÓRIO FINAL ===
@@ -156,12 +225,13 @@ Console.WriteLine($"Imagens únicas:      {totalUnique}");
 Console.WriteLine($"Imagens repetidas:    {totalDuplicates} (mantidas localmente, não foram para o S3)");
 Console.WriteLine($"Vídeos:              {totalVideos}");
 Console.WriteLine($"Arquivo zip:         {Path.GetFileName(zipPath)} (organizadas + vídeos)");
-Console.WriteLine($"Upload S3:           Concluído");
+Console.WriteLine($"Upload S3:           {(s3UploadSuccess ? "Concluído" : "Falhou")}");
 Console.WriteLine($"Deletados do Drive:   {deletedCount}");
+Console.WriteLine($"Arquivos locais:      {(s3UploadSuccess ? "Excluídos" : "Mantidos (backup)")}");
 Console.WriteLine();
 
-// === ETAPA 6: Criar repositório no GitHub ===
-Console.WriteLine("6. Criando repositório no GitHub...");
+// === ETAPA 7: Criar repositório no GitHub ===
+Console.WriteLine("7. Criando repositório no GitHub...");
 var gitHubService = new GitHubService(
     gitHubConfig["Token"]!,
     gitHubConfig["Owner"]!,
@@ -182,3 +252,12 @@ else
 
 Console.WriteLine();
 Console.WriteLine("Concluído!");
+
+// === FUNÇÃO AUXILIAR: Deletar pasta recursivamente ===
+static void DeleteFolderIfExists(string path)
+{
+    if (Directory.Exists(path))
+    {
+        Directory.Delete(path, recursive: true);
+    }
+}

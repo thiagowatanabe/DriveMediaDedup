@@ -24,6 +24,8 @@ public class ZipService
         // Apenas organizadas e videos — repetidas ficam de fora
         AddFolderToZip(archive, baseDownloadsPath, "organizadas");
         AddFolderToZip(archive, baseDownloadsPath, "videos");
+
+        return zipPath;  // ← FALTAVA ESTA LINHA
     }
 
     private static void AddFolderToZip(ZipArchive archive, string basePath, string folderName)
