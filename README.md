@@ -401,6 +401,4 @@ Este projeto está sob a licença MIT. Sinta-se livre para usar e modificar.
 
 ---
 
-Local e data: Brasília, 23 de agosto de 2026
-
 *Documento elaborado em 23 de agosto de 2026. As informações contidas são de responsabilidade do solicitante.*
